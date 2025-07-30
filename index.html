@@ -90,8 +90,8 @@
                 <div class="letter-container">
                     <div class="letter-paper">
                         <div class="letter-header">
-                            <p>Para: <span id="letterRecipient">Mi Amor</span></p>
-                            <p>De: <span id="letterSender"></span></p>
+                            <p>Para: <input type="text" id="letterRecipient" class="letter-field" value="Mi Amor" placeholder="Nombre del destinatario..."></p>
+                            <p>De: <input type="text" id="letterSender" class="letter-field" placeholder="Tu nombre..."></p>
                             <p>Fecha: <span id="letterDate"></span></p>
                         </div>
                         <textarea id="letterContent" placeholder="Querida mía,
@@ -121,14 +121,19 @@ Con todo mi amor,"></textarea>
             <section id="photosSection" class="content-section">
                 <div class="section-header">
                     <h2><i class="fas fa-camera"></i> Nuestras Fotos</h2>
-                    <label for="photoInput" class="btn-secondary">
-                        <i class="fas fa-plus"></i> Subir
-                    </label>
-                    <input type="file" id="photoInput" accept="image/*" multiple style="display: none;">
                 </div>
 
-                <div id="photosGrid" class="photos-grid">
-                    <!-- Las fotos se cargarán aquí -->
+                <div class="coming-soon-container">
+                    <div class="coming-soon-content">
+                        <i class="fas fa-camera coming-soon-icon"></i>
+                        <h3>Próximamente</h3>
+                        <p>Esta sección estará disponible muy pronto.<br>Podrás subir y ver todas nuestras fotos especiales ❤️</p>
+                        <div class="coming-soon-hearts">
+                            <i class="fas fa-heart"></i>
+                            <i class="fas fa-heart"></i>
+                            <i class="fas fa-heart"></i>
+                        </div>
+                    </div>
                 </div>
             </section>
         </main>

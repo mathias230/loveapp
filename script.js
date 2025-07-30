@@ -5,6 +5,7 @@ let photos = [];
 let currentPhotoIndex = 0;
 let supabase = null;
 let isSupabaseConnected = false;
+let isFirebaseConnected = false; // Variable temporal para evitar errores
 
 // Configuración de Supabase - REEMPLAZA CON TUS CREDENCIALES REALES
 const supabaseConfig = {
@@ -136,57 +137,49 @@ function initializeSupabase() {
 
 // Configurar listeners en tiempo real
 function setupRealtimeListeners() {
-    if (!isFirebaseConnected || !database) return;
+    if (!isSupabaseConnected || !supabase) return;
     
-    console.log('🔊 Configurando listeners en tiempo real...');
+    console.log('🔊 Configurando listeners en tiempo real de Supabase...');
     
-    // Listener para mensajes en tiempo real
-    database.ref('messages').on('value', (snapshot) => {
-        const firebaseMessages = snapshot.val();
-        if (firebaseMessages) {
-            const newMessages = Object.keys(firebaseMessages).map(key => ({
-                id: key,
-                ...firebaseMessages[key]
-            })).sort((a, b) => b.timestamp - a.timestamp);
-            
-            // Verificar si hay mensajes nuevos
-            if (messages.length > 0 && newMessages.length > messages.length) {
-                const latestMessage = newMessages[0];
-                if (latestMessage.author !== currentUser) {
-                    showToast('Nuevo mensaje 💕', `${latestMessage.author}: ${latestMessage.text.substring(0, 50)}...`, 'info');
-                    showHeartAnimation();
-                }
+    // Suscripción a cambios en mensajes
+    const messagesSubscription = supabase
+        .channel('messages')
+        .on('postgres_changes', 
+            { 
+                event: '*', 
+                schema: 'public', 
+                table: 'messages' 
+            }, 
+            payload => {
+                console.log('Cambio en mensajes:', payload);
+                loadDataFromSupabase(); // Recargar datos cuando hay cambios
             }
-            
-            messages = newMessages;
-            loadMessages();
-        }
-    });
+        )
+        .subscribe();
     
-    // Listener para fotos en tiempo real
-    database.ref('photos').on('value', (snapshot) => {
-        const firebasePhotos = snapshot.val();
-        if (firebasePhotos) {
-            const newPhotos = Object.keys(firebasePhotos).map(key => ({
-                id: key,
-                ...firebasePhotos[key]
-            })).sort((a, b) => b.timestamp - a.timestamp);
-            
-            // Verificar si hay fotos nuevas
-            if (photos.length > 0 && newPhotos.length > photos.length) {
-                const latestPhoto = newPhotos[0];
-                if (latestPhoto.uploadedBy !== currentUser) {
-                    showToast('Nueva foto 📷', `${latestPhoto.uploadedBy} subió una foto nueva`, 'info');
-                    showHeartAnimation();
-                }
+    // Suscripción a cambios en fotos
+    const photosSubscription = supabase
+        .channel('photos')
+        .on('postgres_changes',
+            {
+                event: '*',
+                schema: 'public',
+                table: 'photos'
+            },
+            payload => {
+                console.log('Cambio en fotos:', payload);
+                loadDataFromSupabase(); // Recargar datos cuando hay cambios
             }
-            
-            photos = newPhotos;
-            loadPhotos();
-        }
-    });
+        )
+        .subscribe();
     
-    console.log('✅ Listeners en tiempo real configurados');
+    console.log('✅ Listeners en tiempo real de Supabase configurados');
+    
+    // Retornar las suscripciones para poder cancelarlas si es necesario
+    return () => {
+        supabase.removeChannel(messagesSubscription);
+        supabase.removeChannel(photosSubscription);
+    };
 }
 
 // Funciones de carga de datos desde Supabase
@@ -248,24 +241,31 @@ function saveMessageToSupabase(message) {
             date: message.date,
             timestamp: message.timestamp
         })
-        .then(({ error }) => {
+        .then(({ data, error }) => {
             if (error) {
                 console.error('❌ Error guardando mensaje en Supabase:', error);
                 // Fallback a localStorage
+                messages.unshift({id: Date.now(), ...message});
                 saveData();
+                loadMessages();
             } else {
                 console.log('✅ Mensaje guardado en Supabase');
+                // Actualizar la vista inmediatamente
+                loadDataFromSupabase();
             }
         });
 }
 
-// Subir foto a Supabase
+// Subir foto a Supabase con fallback a localStorage
 function uploadPhotoToSupabase(photoData, fileName) {
     if (!isSupabaseConnected || !supabase) {
-        console.log('Guardando foto en localStorage como fallback');
-        saveData();
+        console.log('Supabase no conectado, guardando foto en localStorage');
+        savePhotoToLocalStorage(photoData, fileName);
         return;
     }
+    
+    // Intentar subir a Supabase Storage
+    console.log('📤 Intentando subir foto a Supabase Storage...');
     
     // Convertir data URL a blob
     const byteString = atob(photoData.split(',')[1]);
@@ -284,9 +284,15 @@ function uploadPhotoToSupabase(photoData, fileName) {
         .then(({ data, error }) => {
             if (error) {
                 console.error('❌ Error subiendo foto a Storage:', error);
-                showToast('Error', 'No se pudo subir la foto', 'error');
+                console.log('🔄 Usando fallback a localStorage...');
+                showToast('Modo offline', 'Foto guardada localmente (Storage no disponible)', 'warning');
+                
+                // Fallback a localStorage
+                savePhotoToLocalStorage(photoData, fileName);
                 return;
             }
+            
+            console.log('✅ Foto subida a Storage exitosamente');
             
             // Obtener URL pública
             const { data: { publicUrl } } = supabase.storage
@@ -306,12 +312,43 @@ function uploadPhotoToSupabase(photoData, fileName) {
                 .then(({ error: dbError }) => {
                     if (dbError) {
                         console.error('❌ Error guardando referencia de foto:', dbError);
-                        showToast('Error', 'Foto subida pero no se pudo guardar la referencia', 'warning');
+                        showToast('Parcialmente guardada', 'Foto subida pero referencia no guardada', 'warning');
+                        
+                        // Fallback: guardar también en localStorage
+                        savePhotoToLocalStorage(photoData, fileName);
                     } else {
-                        console.log('✅ Foto guardada en Supabase');
+                        console.log('✅ Foto y referencia guardadas en Supabase');
+                        showToast('¡Foto subida!', 'Foto guardada en la nube 📷✨', 'success');
+                        
+                        // Recargar fotos
+                        loadDataFromSupabase();
                     }
                 });
+        })
+        .catch(error => {
+            console.error('❌ Error inesperado subiendo foto:', error);
+            showToast('Error de conexión', 'Guardando foto localmente', 'warning');
+            savePhotoToLocalStorage(photoData, fileName);
         });
+}
+
+// Función auxiliar para guardar fotos en localStorage
+function savePhotoToLocalStorage(photoData, fileName) {
+    const photo = {
+        id: Date.now() + Math.random(),
+        src: photoData,
+        name: fileName,
+        date: new Date().toLocaleDateString('es-ES'),
+        timestamp: Date.now(),
+        uploaded_by: currentUser
+    };
+    
+    photos.unshift(photo);
+    saveData();
+    loadPhotos();
+    
+    showToast('¡Foto guardada!', 'Foto guardada localmente 📷', 'success');
+    showHeartAnimation();
 }
 
 
@@ -554,9 +591,9 @@ function saveMessage() {
             timestamp: Date.now()
         };
         
-        // Guardar en Firebase (tiempo real) o localStorage (fallback)
-        if (isFirebaseConnected) {
-            saveMessageToFirebase(message);
+        // Guardar en Supabase (tiempo real) o localStorage (fallback)
+        if (isSupabaseConnected && supabase) {
+            saveMessageToSupabase(message);
         } else {
             messages.unshift({id: Date.now(), ...message});
             saveData();
@@ -577,9 +614,30 @@ function saveMessage() {
 
 function deleteMessage(messageId) {
     if (confirm('¿Estás segura que quieres eliminar este mensaje? 💔')) {
-        messages = messages.filter(msg => msg.id !== messageId);
-        saveData();
-        loadMessages();
+        if (isSupabaseConnected && supabase) {
+            // Eliminar de Supabase
+            supabase
+                .from('messages')
+                .delete()
+                .eq('id', messageId)
+                .then(({ error }) => {
+                    if (error) {
+                        console.error('❌ Error eliminando mensaje de Supabase:', error);
+                        showToast('Error', 'No se pudo eliminar el mensaje', 'error');
+                    } else {
+                        console.log('✅ Mensaje eliminado de Supabase');
+                        showToast('Eliminado', 'Mensaje eliminado correctamente 💔', 'success');
+                        // Recargar mensajes desde Supabase
+                        loadDataFromSupabase();
+                    }
+                });
+        } else {
+            // Eliminar de localStorage
+            messages = messages.filter(msg => msg.id !== messageId);
+            saveData();
+            loadMessages();
+            showToast('Eliminado', 'Mensaje eliminado correctamente 💔', 'success');
+        }
     }
 }
 
@@ -602,17 +660,22 @@ function loadMessages() {
         return;
     }
     
-    messagesList.innerHTML = messages.map(message => `
-        <div class="message-card">
-            <div class="message-content">${message.text}</div>
-            <div class="message-meta">
-                <span>Por ${message.author} • ${message.date}</span>
-                <button onclick="deleteMessage(${message.id})" class="delete-message">
-                    <i class="fas fa-trash"></i>
-                </button>
+    messagesList.innerHTML = messages.map(message => {
+        const isCurrentUser = message.author === currentUser;
+        const messageId = message.id || Date.now(); // Fallback para IDs faltantes
+        return `
+            <div class="message-bubble ${isCurrentUser ? 'own-message' : 'other-message'}">
+                <div class="message-header">
+                    <span class="message-author">${message.author}</span>
+                    <span class="message-time">${new Date(message.timestamp).toLocaleTimeString('es-ES', {hour: '2-digit', minute: '2-digit'})}</span>
+                </div>
+                <div class="message-content">${message.text}</div>
+                <div class="message-actions">
+                    ${isCurrentUser ? `<button onclick="deleteMessage('${messageId}')" class="delete-message" title="Eliminar mensaje"><i class="fas fa-trash"></i></button>` : ''}
+                </div>
             </div>
-        </div>
-    `).join('');
+        `;
+    }).join('');
 }
 
 // Funciones de cartas
@@ -918,9 +981,9 @@ function handlePhotoUpload(event) {
             reader.onload = function(e) {
                 const fileName = `${Date.now()}_${file.name}`;
                 
-                // Subir a Firebase (tiempo real) o guardar en localStorage (fallback)
-                if (isFirebaseConnected) {
-                    uploadPhotoToFirebase(e.target.result, fileName);
+                // Subir a Supabase (tiempo real) o guardar en localStorage (fallback)
+                if (isSupabaseConnected && supabase) {
+                    uploadPhotoToSupabase(e.target.result, fileName);
                 } else {
                     // Fallback a localStorage
                     const photo = {
@@ -929,19 +992,15 @@ function handlePhotoUpload(event) {
                         name: file.name,
                         date: new Date().toLocaleDateString('es-ES'),
                         timestamp: Date.now(),
-                        uploadedBy: currentUser
+                        uploaded_by: currentUser  // Cambiado de uploadedBy a uploaded_by para coincidir con Supabase
                     };
                     
                     photos.unshift(photo);
                     saveData();
                     loadPhotos();
-                }
-                
-                uploadedCount++;
-                
-                // Mostrar notificación cuando se complete la subida
-                if (uploadedCount === totalFiles) {
-                    showToast('¡Fotos subidas!', `${uploadedCount} foto(s) agregada(s) a la galería 💕`, 'success');
+                    
+                    // Mostrar notificación de éxito
+                    showToast('¡Fotos subidas!', 'Foto agregada a la galería 💕', 'success');
                     showHeartAnimation();
                 }
             };
